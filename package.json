@@ -1,0 +1,15 @@
+{
+  "name": "aequor",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "chain"
+  ],
+  "scripts": {
+    "web": "npm run dev --workspace=apps/web",
+    "api": "npm run dev --workspace=apps/api",
+    "chain:test": "npm run test --workspace=chain",
+    "chain:build": "anchor build",
+    "chain:deploy": "anchor deploy"
+  }
+}

@@ -1,0 +1,13 @@
+node_modules
+.env
+.env.local
+
+# Next.js
+apps/web/.next
+
+# Anchor
+chain/target
+chain/node_modules
+
+# OS
+.DS_Store
