@@ -1,0 +1,19 @@
+[package]
+name = "swarm_bus"
+version = "0.1.0"
+description = "Aequor: Swarm Bus Program"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "swarm_bus"
+
+[features]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+cpi = ["no-entrypoint"]
+default = []
+
+[dependencies]
+anchor-lang = "0.32.1"
