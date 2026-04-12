@@ -4,5 +4,5 @@ declare_id!("2hYgwHGvPEpqSumayofrqiqLfpyqJadLRMad1tfLtuoW");
 
 #[program]
 pub mod escrow {
-    use super::*;
+    
 }
