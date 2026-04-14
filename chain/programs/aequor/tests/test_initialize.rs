@@ -1,11 +1,13 @@
 
 use {
-    anchor_lang::{solana_program::instruction::Instruction, InstructionData, ToAccountMetas},
+    anchor_lang::{InstructionData, ToAccountMetas},
     litesvm::LiteSVM,
-    solana_message::{Message, VersionedMessage},
-    solana_signer::Signer,
-    solana_keypair::Keypair,
-    solana_transaction::versioned::VersionedTransaction,
+    solana_sdk::{
+        instruction::Instruction,
+        message::{Message, VersionedMessage},
+        signature::{Keypair, Signer},
+        transaction::VersionedTransaction,
+    },
 };
 
 #[test]
