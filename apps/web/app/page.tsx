@@ -8,6 +8,8 @@ const agents = [
   { id: "07", name: "Plutus", role: "Payment Streamer", tech: "Stream CPI" },
 ];
 
+// Sourish Ghosh
+
 const onChain = [
   ["Escrow Program", "Rust + Anchor, milestone vault PDA, dispute logic"],
   ["Swarm Bus", "Agent message router, PDA per agent keypair"],
