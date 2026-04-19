@@ -9,5 +9,15 @@ apps/web/.next
 chain/target
 chain/node_modules
 
+# Python / Agent
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+apps/agent1/.env
+
 # OS
 .DS_Store

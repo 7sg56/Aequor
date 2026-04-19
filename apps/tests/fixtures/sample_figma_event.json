@@ -1,0 +1,22 @@
+{
+  "projects": [
+    {
+      "id": "proj_001",
+      "name": "Aequor UI Kit"
+    }
+  ],
+  "files": [
+    {
+      "key": "FIGMA_FILE_KEY_001",
+      "name": "Dashboard v2",
+      "last_modified": "2026-04-19T11:30:00Z",
+      "thumbnail_url": "https://figma.com/thumbnails/abc123.png"
+    },
+    {
+      "key": "FIGMA_FILE_KEY_002",
+      "name": "Component Library",
+      "last_modified": "2026-04-18T09:00:00Z",
+      "thumbnail_url": "https://figma.com/thumbnails/def456.png"
+    }
+  ]
+}

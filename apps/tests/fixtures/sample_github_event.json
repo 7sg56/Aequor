@@ -1,0 +1,36 @@
+{
+  "ref": "refs/heads/main",
+  "repository": {
+    "full_name": "aequor-org/demo-repo"
+  },
+  "commits": [
+    {
+      "id": "abc123def456789",
+      "message": "feat: add milestone 3 deliverable",
+      "timestamp": "2026-04-19T12:00:00+00:00",
+      "url": "https://github.com/aequor-org/demo-repo/commit/abc123def456789",
+      "author": {
+        "name": "Alice Dev",
+        "email": "alice@example.com",
+        "username": "alice-dev"
+      },
+      "added": ["src/milestone3.py"],
+      "modified": ["README.md"],
+      "removed": []
+    },
+    {
+      "id": "def789abc123456",
+      "message": "fix: correct edge case in payment logic",
+      "timestamp": "2026-04-19T12:05:00+00:00",
+      "url": "https://github.com/aequor-org/demo-repo/commit/def789abc123456",
+      "author": {
+        "name": "Bob Builder",
+        "email": "bob@example.com",
+        "username": "bob-builder"
+      },
+      "added": [],
+      "modified": ["src/payments.py", "tests/test_payments.py"],
+      "removed": ["src/legacy.py"]
+    }
+  ]
+}
