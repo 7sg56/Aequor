@@ -128,22 +128,30 @@ class SolanaWriter:
         Build the Solana instruction to write a WorkSignal.
 
         Instruction layout:
-          [0]    u8   discriminator  (0 = emit_work_signal)
-          [1:5]  u32  schema_version
-          [5:9]  u32  payload_len
-          [9:..]  bytes  JSON payload (compact)
+          [0:8]   discriminator (sha256("global:emit_work_signal")[..8])
+          [8:..]  borsh serialized args: signal_id (String), schema_version (u32), payload (String)
         """
+        import hashlib
+        
+        # 1. 8-byte discriminator
+        discriminator = hashlib.sha256(b"global:emit_work_signal").digest()[:8]
+        
+        # 2. Borsh serialize signal_id
+        signal_id_bytes = signal.signal_id.encode()
+        signal_id_borsh = struct.pack("<I", len(signal_id_bytes)) + signal_id_bytes
+        
+        # 3. Borsh serialize schema_version (u32)
+        schema_ver_borsh = struct.pack("<I", signal.schema_version)
+        
+        # 4. Borsh serialize payload (JSON string)
         payload_json = json.dumps(
             signal.to_bus_payload(),
             separators=(",", ":"),
             sort_keys=True,
         ).encode()
+        payload_borsh = struct.pack("<I", len(payload_json)) + payload_json
 
-        # Instruction data: discriminator + schema_version + length-prefixed JSON
-        discriminator = b"\x00"
-        schema_ver = struct.pack("<I", signal.schema_version)
-        payload_len = struct.pack("<I", len(payload_json))
-        ix_data = discriminator + schema_ver + payload_len + payload_json
+        ix_data = discriminator + signal_id_borsh + schema_ver_borsh + payload_borsh
 
         # Derive PDA
         pda, _bump = self.derive_signal_pda(signal.signal_id)
