@@ -6,7 +6,7 @@ launches polling loops for pull-based adapters, and dispatches
 every WorkSignal to the Solana writer.
 
 Run with:
-    python -m apps.agent1.core
+    python -m apps.Argus.core
 """
 
 from __future__ import annotations
@@ -22,14 +22,14 @@ import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from apps.agent1.adapters.base import PlatformAdapter
-from apps.agent1.adapters.figma import FigmaAdapter
-from apps.agent1.adapters.github import GitHubAdapter
-from apps.agent1.adapters.notion import NotionAdapter
-from apps.agent1.adapters.webhook import GenericWebhookAdapter
-from apps.agent1.config import ArgusConfig, load_config
-from apps.agent1.schema import SignalStatus, WorkSignal
-from apps.agent1.solana_writer import SolanaWriter
+from apps.Argus.adapters.base import PlatformAdapter
+from apps.Argus.adapters.figma import FigmaAdapter
+from apps.Argus.adapters.github import GitHubAdapter
+from apps.Argus.adapters.notion import NotionAdapter
+from apps.Argus.adapters.webhook import GenericWebhookAdapter
+from apps.Argus.config import ArgusConfig, load_config
+from apps.Argus.schema import SignalStatus, WorkSignal
+from apps.Argus.solana_writer import SolanaWriter
 
 # ---------------------------------------------------------------------------
 # Logging setup
@@ -281,7 +281,7 @@ def build_agent(config: ArgusConfig | None = None) -> tuple[ArgusAgent, FastAPI]
 # Entrypoint
 # ---------------------------------------------------------------------------
 def main() -> None:
-    """CLI entrypoint — python -m apps.agent1.core"""
+    """CLI entrypoint — python -m apps.Argus.core"""
     config = load_config()
     _agent, app = build_agent(config)
 

@@ -23,7 +23,7 @@ from solders.pubkey import Pubkey  # type: ignore[import]
 from solders.transaction import Transaction  # type: ignore[import]
 from solders.system_program import ID as SYSTEM_PROGRAM_ID  # type: ignore[import]
 
-from apps.agent1.schema import WorkSignal
+from apps.Argus.schema import WorkSignal
 
 logger = logging.getLogger("argus.solana")
 

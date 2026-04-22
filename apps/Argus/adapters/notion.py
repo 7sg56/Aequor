@@ -14,7 +14,7 @@ from typing import Any, Optional
 import httpx
 from fastapi import Request
 
-from apps.agent1.schema import EventType, Platform, WorkSignal
+from apps.Argus.schema import EventType, Platform, WorkSignal
 
 from .base import PlatformAdapter
 

@@ -14,7 +14,7 @@ from typing import Any, Optional
 
 from fastapi import Request
 
-from apps.agent1.schema import Platform, WorkSignal
+from apps.Argus.schema import Platform, WorkSignal
 
 logger = logging.getLogger("argus.adapter")
 
