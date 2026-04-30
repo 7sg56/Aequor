@@ -1,58 +1,111 @@
-# Aequor
+# Aequor — AI-Verified Freelance Payments on Solana
 
-A modern Solana monorepo containing a web frontend, an API backend, and Anchor-based on-chain programs.
+> Multi-agent work verification + conditional payment streaming platform for dev gigs.
+
+## Architecture
+
+```
+Client/Worker Submit Work
+        |
+        v
+   [Argus] — Evidence Fetcher (GitHub commits, PRs, tests, files)
+        |     Spawns audit streams via Groq:
+        v (parallel)
++-------+-------+
+[Themis] [Dike] [Chronos]
+Spec     Quality  Timeliness
+        |
+        v
+   [Kratos] — Consensus Orchestrator (40% objective + 60% AI)
+        |
+   +----+----+
+   |         |
+[Plutus]  [Nemesis]
+Payment   Disputes
+Streamer  Arbiter
+```
 
 ## Project Structure
 
-- **`apps/web`**: Next.js frontend application.
-- **`apps/api`**: Express.js API backend powered by TypeScript.
-- **`chain`**: Solana on-chain programs using the Anchor framework.
+```
+driftpay/
+  apps/
+    web/          — Next.js frontend (dashboard, landing)
+    api/          — Fastify backend (agents, routes, Prisma)
+      src/
+        agents/   — Argus, Themis, Dike, Chronos, Kratos, Nemesis, Plutus
+        api/      — Fastify route handlers
+        blockchain/ — Solana interaction layer
+        config/   — Environment config
+        db/       — Prisma client
+        queue/    — BullMQ job queues
+        types/    — TypeScript type definitions
+        utils/    — Logger, crypto helpers
+      prisma/     — Schema + migrations
+    tests/        — Integration tests
+  chain/          — Solana Anchor programs
+    programs/
+      aequor/           — Core program
+      escrow/           — Escrow logic
+      reputation/       — On-chain reputation
+      stream_payment/   — Streamed payouts
+      swarm_bus/        — Inter-agent messaging
+```
+
+## Tech Stack
+
+| Layer | Tech |
+|---|---|
+| Frontend | Next.js + TypeScript + Tailwind |
+| Backend | Fastify + TypeScript |
+| Queue | Redis + BullMQ |
+| LLM | Groq API (llama-3.3-70b) |
+| Database | PostgreSQL + Prisma |
+| Blockchain | Solana devnet (Anchor) |
 
 ## Getting Started
 
-### Prerequisites
-
-- Node.js & npm/yarn
-- Rust & Cargo
-- Solana CLI
-- Anchor Framework
-
-### Installation
-
-Clone the repository and install dependencies from the root:
-
 ```bash
+# 1. Start infrastructure
+docker-compose up -d
+
+# 2. Install deps
 yarn install
+
+# 3. Setup API
+cd apps/api
+cp .env.example .env
+npx prisma migrate dev --name init
+npx prisma generate
+
+# 4. Run
+yarn web   # frontend on :3000
+yarn api   # backend on :4000
 ```
 
-### Development
+## Scoring Model
 
-You can run the web and API applications concurrently from the root:
+| Signal Type | Weight | Examples |
+|---|---|---|
+| Objective | 40% | commits, tests passed, files changed, deadlines |
+| AI Reasoning | 60% | relevance, quality, completeness, maintainability |
 
-```bash
-# Run web frontend
-npm run web
+**Payout Rules:**
+- Score >= 80 -> Auto release payment (Plutus)
+- Score 60-79 -> Manual review / revision request
+- Score < 60 -> Hold payment
 
-# Run API backend
-npm run api
-```
+## Agent Roles
 
-### On-chain Programs
-
-Navigate to the `chain` directory to manage Solana programs:
-
-```bash
-cd chain
-
-# Build programs
-anchor build
-
-# Run tests
-anchor test
-
-# Deploy to localnet
-anchor deploy
-```
+| Agent | Role | Implementation |
+|---|---|---|
+| Argus | Evidence fetch + audit orchestrator | MVP (GitHub + Groq) |
+| Themis | Spec compliance audit stream | MVP (Groq prompt) |
+| Dike | Code quality audit stream | MVP (Groq prompt) |
+| Chronos | Timeliness audit stream | MVP (Groq prompt) |
+| Kratos | Consensus orchestrator | MVP |
+| Nemesis | Dispute arbiter | Simulated |
+| Plutus | Solana payment streamer | MVP (devnet) |
 
 ## License
 
