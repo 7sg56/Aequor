@@ -1,0 +1,202 @@
+// This is your Prisma schema file for Aequor
+// AI-verified freelance payment streaming on Solana
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ── Tasks (the gig/bounty/contract) ──────────────────────────────────────────
+
+model Task {
+  id           String      @id @default(cuid())
+  title        String
+  description  String
+  repoUrl      String?
+  branch       String      @default("main")
+  specs        Json        // requirements / acceptance criteria
+  escrowAmount Float       // SOL amount locked
+  escrowTx     String?     // on-chain escrow tx signature
+  clientWallet String      // who pays
+  workerWallet String?     // who works (null until assigned)
+  status       TaskStatus  @default(OPEN)
+  score        Float?      // final consensus score (0-100)
+  decision     Decision?
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+
+  submissions  Submission[]
+  agentReports AgentReport[]
+  payments     Payment[]
+  disputes     Dispute[]
+
+  @@index([clientWallet])
+  @@index([workerWallet])
+  @@index([status])
+}
+
+enum TaskStatus {
+  OPEN
+  ASSIGNED
+  SUBMITTED
+  REVIEWING
+  APPROVED
+  REVISION_REQUESTED
+  DISPUTED
+  COMPLETED
+  CANCELLED
+}
+
+enum Decision {
+  AUTO_RELEASE
+  MANUAL_REVIEW
+  HOLD
+  DISPUTED
+}
+
+// ── Submissions (worker submits proof of work) ───────────────────────────────
+
+model Submission {
+  id          String   @id @default(cuid())
+  taskId      String
+  task        Task     @relation(fields: [taskId], references: [id])
+  repoUrl     String
+  branch      String   @default("main")
+  commitHash  String?
+  prUrl       String?
+  notes       String?
+  evidence    Json?    // fetched by Argus: commits, files, tests, etc.
+  submittedAt DateTime @default(now())
+
+  @@index([taskId])
+}
+
+// ── Agent Reports ────────────────────────────────────────────────────────────
+
+model AgentReport {
+  id              String        @id @default(cuid())
+  taskId          String
+  task            Task          @relation(fields: [taskId], references: [id])
+  agentName       AgentName
+  score           Float         // 0-100
+  confidence      Float         // 0-1
+  severity        Severity      @default(INFO)
+  summary         String
+  reasoning       String?       @db.Text
+  details         Json?
+  recommendations String[]
+  createdAt       DateTime      @default(now())
+
+  @@index([taskId])
+  @@index([agentName])
+}
+
+enum AgentName {
+  ARGUS
+  THEMIS
+  DIKE
+  CHRONOS
+  KRATOS
+  NEMESIS
+  PLUTUS
+}
+
+enum Severity {
+  INFO
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+// ── Payments (Solana stream/release) ─────────────────────────────────────────
+
+model Payment {
+  id            String        @id @default(cuid())
+  taskId        String
+  task          Task          @relation(fields: [taskId], references: [id])
+  fromWallet    String
+  toWallet      String
+  amount        Float         // SOL
+  txSignature   String?
+  status        PaymentStatus @default(PENDING)
+  streamRate    Float?        // SOL per second (for streaming)
+  startedAt     DateTime?
+  completedAt   DateTime?
+  createdAt     DateTime      @default(now())
+
+  @@index([taskId])
+  @@index([fromWallet])
+  @@index([toWallet])
+}
+
+enum PaymentStatus {
+  PENDING
+  STREAMING
+  COMPLETED
+  FAILED
+  REFUNDED
+}
+
+// ── Disputes ─────────────────────────────────────────────────────────────────
+
+model Dispute {
+  id          String        @id @default(cuid())
+  taskId      String
+  task        Task          @relation(fields: [taskId], references: [id])
+  raisedBy    String        // wallet
+  reason      String        @db.Text
+  evidence    Json?
+  resolution  String?       @db.Text
+  status      DisputeStatus @default(OPEN)
+  resolvedBy  String?       // NEMESIS or human
+  createdAt   DateTime      @default(now())
+  resolvedAt  DateTime?
+
+  @@index([taskId])
+}
+
+enum DisputeStatus {
+  OPEN
+  REVIEWING
+  RESOLVED_FOR_CLIENT
+  RESOLVED_FOR_WORKER
+  ESCALATED
+}
+
+// ── Audit Log ────────────────────────────────────────────────────────────────
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  action    String
+  actor     String   // wallet or agent name
+  target    String   // task id, payment id, etc.
+  details   Json?
+  createdAt DateTime @default(now())
+
+  @@index([action])
+  @@index([actor])
+  @@index([createdAt])
+}
+
+// ── Wallet Reputation ────────────────────────────────────────────────────────
+
+model WalletReputation {
+  id                 String   @id @default(cuid())
+  address            String   @unique
+  score              Float    @default(50)
+  totalTasks         Int      @default(0)
+  completedTasks     Int      @default(0)
+  disputeCount       Int      @default(0)
+  avgScore           Float    @default(0)
+  onChainReputation  Float?
+  firstSeen          DateTime @default(now())
+  lastActive         DateTime @default(now())
+
+  @@index([address])
+  @@index([score])
+}
