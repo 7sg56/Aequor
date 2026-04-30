@@ -30,6 +30,12 @@ export interface GitHubEvidence {
   filesChanged: FileData[];
   languages: Record<string, number>;
   repoMeta: { stars: number; forks: number; openIssues: number; defaultBranch: string };
+  // Actual code content for Groq to analyze
+  codeSnapshots: CodeSnapshot[];
+  readmeContent: string | null;
+  commitDiffs: CommitDiff[];
+  // CI / test pipeline results
+  ciResults: CIResult[];
 }
 
 interface CommitData {
@@ -56,6 +62,29 @@ interface FileData {
   additions: number;
   deletions: number;
   language: string | null;
+}
+
+interface CodeSnapshot {
+  path: string;
+  language: string | null;
+  content: string;         // actual file content (truncated to ~2000 chars)
+  sizeBytes: number;
+}
+
+interface CommitDiff {
+  sha: string;
+  message: string;
+  patch: string;           // unified diff (truncated)
+}
+
+interface CIResult {
+  name: string;            // workflow or check name
+  status: 'success' | 'failure' | 'pending' | 'neutral' | 'skipped';
+  conclusion: string | null;
+  url: string | null;
+  startedAt: string | null;
+  completedAt: string | null;
+  runNumber?: number;
 }
 
 // ── Audit Stream Result ──────────────────────────────────────────────────────
@@ -108,10 +137,12 @@ async function fetchGitHubEvidence(repoUrl: string, branch: string): Promise<Git
 
     // Fetch file tree
     let filesChanged: FileData[] = [];
+    let allPaths: string[] = [];
     try {
       const treeRes = await octokit.rest.git.getTree({ owner, repo, tree_sha: branch, recursive: 'true' });
-      filesChanged = treeRes.data.tree
-        .filter((f: any) => f.type === 'blob')
+      const blobs = treeRes.data.tree.filter((f: any) => f.type === 'blob');
+      allPaths = blobs.map((f: any) => f.path ?? '');
+      filesChanged = blobs
         .slice(0, 200)
         .map((f: any) => ({
           filename: f.path ?? '',
@@ -128,11 +159,27 @@ async function fetchGitHubEvidence(repoUrl: string, branch: string): Promise<Git
       if (f.language) languages[f.language] = (languages[f.language] ?? 0) + 1;
     }
 
+    // NEW: Fetch actual code content for key files
+    const codeSnapshots = await fetchKeyFileContents(owner, repo, branch, allPaths);
+
+    // NEW: Fetch README
+    const readmeContent = await fetchReadme(owner, repo, branch);
+
+    // Fetch commit diffs for recent commits
+    const commitDiffs = await fetchCommitDiffs(owner, repo, commits.slice(0, 5));
+
+    // Fetch CI / GitHub Actions results
+    const ciResults = await fetchCIResults(owner, repo, branch, commits[0]?.sha);
+
     return {
       commits,
       pullRequests,
       filesChanged,
       languages,
+      codeSnapshots,
+      readmeContent,
+      commitDiffs,
+      ciResults,
       repoMeta: {
         stars: repoRes?.data.stargazers_count ?? 0,
         forks: repoRes?.data.forks_count ?? 0,
@@ -146,6 +193,201 @@ async function fetchGitHubEvidence(repoUrl: string, branch: string): Promise<Git
     });
     return generateMockEvidence();
   }
+}
+
+// ── Fetch actual file contents ───────────────────────────────────────────────
+
+/**
+ * Intelligently select key files from the repo and fetch their contents.
+ * Prioritizes: entry points, config, tests, and source files.
+ */
+const KEY_FILE_PATTERNS = [
+  /^readme\.md$/i,
+  /^package\.json$/,
+  /^src\/index\.[tj]sx?$/,
+  /^src\/app\.[tj]sx?$/,
+  /^src\/main\.[tj]sx?$/,
+  /^index\.[tj]sx?$/,
+  /\/?routes?\.[tj]sx?$/,
+  /\/?server\.[tj]sx?$/,
+  /\.test\.[tj]sx?$/,
+  /\.spec\.[tj]sx?$/,
+  /^lib\/.*\.[tj]sx?$/,
+  /Cargo\.toml$/,
+  /\/mod\.rs$/,
+  /\/lib\.rs$/,
+];
+
+const MAX_FILE_CONTENT_LENGTH = 2000;
+const MAX_CODE_FILES = 8;
+
+async function fetchKeyFileContents(
+  owner: string,
+  repo: string,
+  branch: string,
+  allPaths: string[],
+): Promise<CodeSnapshot[]> {
+  // Score each path by relevance
+  const scored = allPaths
+    .filter(p => {
+      const ext = p.split('.').pop()?.toLowerCase();
+      return ['ts', 'tsx', 'js', 'jsx', 'rs', 'py', 'sol', 'go', 'toml', 'json', 'md'].includes(ext ?? '');
+    })
+    .map(p => {
+      let priority = 0;
+      for (const pattern of KEY_FILE_PATTERNS) {
+        if (pattern.test(p)) { priority += 10; break; }
+      }
+      // Prefer shorter paths (top-level files)
+      priority += Math.max(0, 5 - p.split('/').length);
+      // Prefer source files
+      if (p.startsWith('src/')) priority += 3;
+      return { path: p, priority };
+    })
+    .sort((a, b) => b.priority - a.priority)
+    .slice(0, MAX_CODE_FILES);
+
+  const snapshots: CodeSnapshot[] = [];
+
+  for (const { path } of scored) {
+    try {
+      const { data } = await octokit.rest.repos.getContent({
+        owner, repo, path, ref: branch,
+      }) as { data: { content?: string; size?: number } };
+
+      if (data.content) {
+        const decoded = Buffer.from(data.content, 'base64').toString('utf-8');
+        snapshots.push({
+          path,
+          language: inferLanguage(path),
+          content: decoded.slice(0, MAX_FILE_CONTENT_LENGTH),
+          sizeBytes: data.size ?? decoded.length,
+        });
+      }
+    } catch {
+      // File might be too large or binary, skip
+    }
+  }
+
+  log.info(`Fetched ${snapshots.length} code snapshots`, {
+    files: snapshots.map(s => s.path),
+  });
+
+  return snapshots;
+}
+
+async function fetchReadme(
+  owner: string,
+  repo: string,
+  branch: string,
+): Promise<string | null> {
+  try {
+    const { data } = await octokit.rest.repos.getReadme({ owner, repo, ref: branch }) as { data: { content?: string } };
+    if (data.content) {
+      return Buffer.from(data.content, 'base64').toString('utf-8').slice(0, 3000);
+    }
+  } catch { /* no readme */ }
+  return null;
+}
+
+async function fetchCommitDiffs(
+  owner: string,
+  repo: string,
+  commits: CommitData[],
+): Promise<CommitDiff[]> {
+  const diffs: CommitDiff[] = [];
+
+  for (const commit of commits.slice(0, 3)) {
+    try {
+      const { data } = await octokit.rest.repos.getCommit({ owner, repo, ref: commit.sha });
+      const patch = (data.files ?? [])
+        .map((f: any) => `--- ${f.filename}\n${(f.patch ?? '').slice(0, 800)}`)
+        .join('\n\n')
+        .slice(0, 2000);
+
+      diffs.push({
+        sha: commit.sha.slice(0, 8),
+        message: commit.message,
+        patch,
+      });
+    } catch { /* skip */ }
+  }
+
+  return diffs;
+}
+
+/**
+ * Fetch CI/CD pipeline results from GitHub Actions workflow runs
+ * and commit check statuses.
+ */
+async function fetchCIResults(
+  owner: string,
+  repo: string,
+  branch: string,
+  headSha?: string,
+): Promise<CIResult[]> {
+  const results: CIResult[] = [];
+
+  // 1. GitHub Actions workflow runs
+  try {
+    const { data } = await octokit.rest.actions.listWorkflowRunsForRepo({
+      owner, repo, branch, per_page: 5, status: 'completed' as any,
+    });
+
+    for (const run of data.workflow_runs.slice(0, 5)) {
+      results.push({
+        name: run.name ?? `Workflow #${run.id}`,
+        status: run.conclusion === 'success' ? 'success'
+          : run.conclusion === 'failure' ? 'failure'
+          : run.conclusion === 'neutral' ? 'neutral'
+          : run.conclusion === 'skipped' ? 'skipped'
+          : 'pending',
+        conclusion: run.conclusion,
+        url: run.html_url,
+        startedAt: run.run_started_at ?? null,
+        completedAt: run.updated_at,
+        runNumber: run.run_number,
+      });
+    }
+  } catch {
+    log.info('No GitHub Actions workflows found');
+  }
+
+  // 2. Commit check suites (covers external CI like Travis, CircleCI, etc.)
+  if (headSha) {
+    try {
+      const { data } = await octokit.rest.checks.listForRef({
+        owner, repo, ref: headSha, per_page: 10,
+      });
+
+      for (const check of data.check_runs) {
+        // Avoid duplicates from Actions (they appear in both APIs)
+        if (results.some(r => r.name === check.name)) continue;
+
+        results.push({
+          name: check.name,
+          status: check.conclusion === 'success' ? 'success'
+            : check.conclusion === 'failure' ? 'failure'
+            : check.conclusion === 'neutral' ? 'neutral'
+            : check.conclusion === 'skipped' ? 'skipped'
+            : 'pending',
+          conclusion: check.conclusion,
+          url: check.html_url,
+          startedAt: check.started_at,
+          completedAt: check.completed_at,
+        });
+      }
+    } catch {
+      log.info('No commit checks found');
+    }
+  }
+
+  log.info(`Fetched ${results.length} CI results`, {
+    passed: results.filter(r => r.status === 'success').length,
+    failed: results.filter(r => r.status === 'failure').length,
+  });
+
+  return results;
 }
 
 function generateMockEvidence(): GitHubEvidence {
@@ -169,6 +411,17 @@ function generateMockEvidence(): GitHubEvidence {
       { filename: 'tests/api.test.ts', status: 'added', additions: 150, deletions: 0, language: 'TypeScript' },
     ],
     languages: { TypeScript: 3 },
+    codeSnapshots: [
+      { path: 'src/index.ts', language: 'TypeScript', content: 'import express from "express";\nconst app = express();\napp.listen(3000);', sizeBytes: 72 },
+    ],
+    readmeContent: '# Project\nA sample project with API routes.',
+    commitDiffs: [
+      { sha: 'mock_0', message: 'feat: implement auth', patch: '+import jwt from "jsonwebtoken";\n+export function verifyToken(token) {\n+  return jwt.verify(token, SECRET);\n+}' },
+    ],
+    ciResults: [
+      { name: 'CI / test', status: 'success', conclusion: 'success', url: null, startedAt: new Date(Date.now() - 3600000).toISOString(), completedAt: new Date(Date.now() - 3500000).toISOString() },
+      { name: 'CI / lint', status: 'success', conclusion: 'success', url: null, startedAt: new Date(Date.now() - 3600000).toISOString(), completedAt: new Date(Date.now() - 3550000).toISOString() },
+    ],
     repoMeta: { stars: 0, forks: 0, openIssues: 0, defaultBranch: 'main' },
   };
 }
@@ -189,18 +442,35 @@ function calculateObjectiveScore(evidence: GitHubEvidence): {
   score: number;
   breakdown: Record<string, number>;
 } {
-  const commitScore = Math.min(evidence.commits.length * 5, 25);
-  const prScore = Math.min(evidence.pullRequests.length * 10, 20);
+  const commitScore = Math.min(evidence.commits.length * 5, 20);
+  const prScore = Math.min(evidence.pullRequests.length * 10, 15);
   const linesAdded = evidence.commits.reduce((s, c) => s + c.additions, 0);
-  const codeVolume = Math.min(linesAdded / 50, 25);
-  const fileScore = Math.min(evidence.filesChanged.length * 0.5, 15);
+  const codeVolume = Math.min(linesAdded / 50, 20);
+  const fileScore = Math.min(evidence.filesChanged.length * 0.5, 10);
   const testFiles = evidence.filesChanged.filter(f =>
     f.filename.includes('test') || f.filename.includes('spec'),
   ).length;
-  const testScore = Math.min(testFiles * 5, 15);
+  const testScore = Math.min(testFiles * 5, 10);
 
-  const score = Math.min(Math.round(commitScore + prScore + codeVolume + fileScore + testScore), 100);
-  return { score, breakdown: { commitScore, prScore, codeVolume, fileScore, testScore } };
+  // CI/test results scoring (up to 25 pts)
+  let ciScore = 0;
+  if (evidence.ciResults.length > 0) {
+    const passed = evidence.ciResults.filter(r => r.status === 'success').length;
+    const failed = evidence.ciResults.filter(r => r.status === 'failure').length;
+    const total = evidence.ciResults.length;
+    if (failed === 0 && passed > 0) {
+      ciScore = 25; // all green
+    } else if (failed > 0) {
+      ciScore = Math.max(0, Math.round(25 * (passed / total) - (failed * 5)));
+    } else {
+      ciScore = 5; // only pending/neutral
+    }
+  } else {
+    ciScore = 5; // no CI configured (neutral, not penalized hard)
+  }
+
+  const score = Math.min(Math.round(commitScore + prScore + codeVolume + fileScore + testScore + ciScore), 100);
+  return { score, breakdown: { commitScore, prScore, codeVolume, fileScore, testScore, ciScore } };
 }
 
 // ── Audit Streams (Groq-powered) ─────────────────────────────────────────────
@@ -210,30 +480,87 @@ function calculateObjectiveScore(evidence: GitHubEvidence): {
  * Argus feeds evidence to each stream and collects structured results.
  */
 
+/**
+ * Build a code context string from snapshots + diffs for Groq.
+ * This gives the LLM actual code to reason about, not just file names.
+ */
+function buildCodeContext(evidence: GitHubEvidence): string {
+  const parts: string[] = [];
+
+  if (evidence.readmeContent) {
+    parts.push(`=== README ===\n${evidence.readmeContent.slice(0, 1500)}`);
+  }
+
+  for (const snap of evidence.codeSnapshots.slice(0, 6)) {
+    parts.push(`=== ${snap.path} (${snap.language}) ===\n${snap.content}`);
+  }
+
+  if (evidence.commitDiffs.length > 0) {
+    parts.push('=== RECENT DIFFS ===');
+    for (const diff of evidence.commitDiffs.slice(0, 3)) {
+      parts.push(`-- ${diff.sha}: ${diff.message} --\n${diff.patch}`);
+    }
+  }
+
+  return parts.join('\n\n').slice(0, 12000); // stay within context window
+}
+
 const AUDIT_STREAM_PROMPTS: Record<string, (specs: Record<string, unknown>, evidence: GitHubEvidence) => string> = {
-  // THEMIS: spec compliance
+  // THEMIS: spec compliance — now sees actual code + README
   THEMIS: (specs, evidence) => `You are Themis, a spec compliance auditor.
 
-TASK SPECS: ${JSON.stringify(specs)}
-EVIDENCE: ${JSON.stringify({ commits: evidence.commits.slice(0, 10), files: evidence.filesChanged.slice(0, 30), prs: evidence.pullRequests })}
+TASK SPECS:
+${JSON.stringify(specs, null, 2)}
 
-Evaluate spec compliance. Respond in JSON:
+FILE STRUCTURE: ${evidence.filesChanged.slice(0, 40).map(f => f.filename).join(', ')}
+
+ACTUAL CODE:
+${buildCodeContext(evidence)}
+
+Evaluate whether the code actually implements what the specs require.
+Check imports, function signatures, route definitions, and logic — not just file names.
+Respond in JSON:
 {"score": <0-100>, "summary": "<1 sentence>", "issues": ["<issue>"], "recommendations": ["<rec>"]}`,
 
-  // DIKE: code quality
+  // DIKE: code quality -- sees real code patterns + CI results
   DIKE: (_specs, evidence) => `You are Dike, a code quality auditor.
 
-EVIDENCE: ${JSON.stringify({ commits: evidence.commits.slice(0, 10), files: evidence.filesChanged.slice(0, 30), languages: evidence.languages })}
+LANGUAGES: ${JSON.stringify(evidence.languages)}
 
-Evaluate code quality (structure, naming, patterns, security, testing). Respond in JSON:
+CI/TEST PIPELINE RESULTS:
+${evidence.ciResults.length > 0
+  ? evidence.ciResults.map(r => `- ${r.name}: ${r.status}${r.conclusion ? ` (${r.conclusion})` : ''}${r.completedAt ? ` at ${r.completedAt}` : ''}`).join('\n')
+  : 'No CI pipeline detected for this repository.'}
+
+ACTUAL CODE:
+${buildCodeContext(evidence)}
+
+Evaluate real code quality:
+1. Structure & organization (are files logically organized?)
+2. Naming (clear variable/function names?)
+3. Error handling (try/catch, validation?)
+4. Security (input sanitization, auth checks?)
+5. Testing (test files present and meaningful?)
+6. CI pipeline (are tests automated? do they pass?)
+
+Base your score on the ACTUAL code you see AND CI results, not assumptions.
+Respond in JSON:
 {"score": <0-100>, "summary": "<1 sentence>", "issues": ["<issue>"], "recommendations": ["<rec>"]}`,
 
-  // CHRONOS: timeliness
+  // CHRONOS: timeliness — uses commit timeline + diff size patterns
   CHRONOS: (_specs, evidence) => `You are Chronos, a timeliness auditor.
 
-COMMIT TIMELINE: ${JSON.stringify(evidence.commits.map(c => ({ date: c.date, message: c.message })))}
+COMMIT TIMELINE:
+${JSON.stringify(evidence.commits.map(c => ({ date: c.date, message: c.message, additions: c.additions, deletions: c.deletions })))}
 
-Evaluate work cadence: is it steady, rushed, or suspicious? Respond in JSON:
+DIFF SAMPLES (most recent):
+${evidence.commitDiffs.map(d => `${d.sha}: ${d.message} (${d.patch.length} chars of changes)`).join('\n')}
+
+Evaluate:
+- Is the commit cadence steady or last-minute cramming?
+- Do diff sizes suggest real incremental work or bulk copy-paste?
+- Are commit messages meaningful or generic?
+Respond in JSON:
 {"score": <0-100>, "summary": "<1 sentence>", "cadence": "steady"|"burst"|"last_minute", "recommendations": ["<rec>"]}`,
 };
 

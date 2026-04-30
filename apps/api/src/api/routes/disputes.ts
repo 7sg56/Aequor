@@ -25,8 +25,9 @@ export async function disputeRoutes(app: FastifyInstance) {
     const task = await prisma.task.findUnique({ where: { id } });
     if (!task) return reply.status(404).send({ success: false, error: { code: 'NOT_FOUND', message: 'Task not found' } });
 
+    const { evidence, ...rest } = parsed.data;
     const dispute = await prisma.dispute.create({
-      data: { taskId: id, ...parsed.data },
+      data: { taskId: id, ...rest, evidence: evidence as any },
     });
 
     await prisma.task.update({ where: { id }, data: { status: 'DISPUTED', decision: 'DISPUTED' } });

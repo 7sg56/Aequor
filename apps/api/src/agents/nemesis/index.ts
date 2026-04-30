@@ -22,7 +22,7 @@ export async function runNemesis(taskId: string, disputeId: string): Promise<voi
   if (!dispute) { log.warn('Dispute not found', { disputeId }); return; }
 
   // Build context from all prior agent reports
-  const auditTrail = reports.map(r => ({
+  const auditTrail = reports.map((r: { agentName: any; score: any; summary: any; recommendations: any; }) => ({
     agent: r.agentName, score: r.score, summary: r.summary,
     recommendations: r.recommendations,
   }));
@@ -48,7 +48,7 @@ export async function runNemesis(taskId: string, disputeId: string): Promise<voi
       : parsed?.favor === 'worker' ? 'RESOLVED_FOR_WORKER' : 'ESCALATED';
   } catch {
     // Heuristic fallback: side with higher consensus score
-    const kratosReport = reports.find(r => r.agentName === 'KRATOS');
+    const kratosReport = reports.find((r: { agentName: string; }) => r.agentName === 'KRATOS');
     const score = kratosReport?.score ?? 50;
     resolvedFor = score >= 70 ? 'RESOLVED_FOR_WORKER' : score < 40 ? 'RESOLVED_FOR_CLIENT' : 'ESCALATED';
     resolution = `Heuristic: consensus score ${score} => ${resolvedFor}`;

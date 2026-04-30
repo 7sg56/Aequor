@@ -6,7 +6,6 @@ import { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { prisma } from '../../db/index.js';
 import { runVerificationPipeline } from '../../agents/index.js';
-import { enqueueVerification } from '../../queue/index.js';
 
 const CreateTaskSchema = z.object({
   title: z.string().min(1),
@@ -72,7 +71,8 @@ export async function taskRoutes(app: FastifyInstance) {
       return reply.status(400).send({ success: false, error: { code: 'VALIDATION', message: parsed.error.message } });
     }
 
-    const task = await prisma.task.create({ data: parsed.data });
+    const { specs, ...rest } = parsed.data;
+    const task = await prisma.task.create({ data: { ...rest, specs: specs as any } });
     await prisma.auditLog.create({
       data: { action: 'task_created', actor: parsed.data.clientWallet, target: task.id },
     });
