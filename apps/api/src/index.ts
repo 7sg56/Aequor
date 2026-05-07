@@ -5,12 +5,14 @@
 
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
+import websocket from '@fastify/websocket';
 import { config } from './config/index.js';
 import { connectDB, disconnectDB } from './db/index.js';
 import { createLogger } from './utils/logger.js';
 import { taskRoutes } from './api/routes/tasks.js';
 import { dashboardRoutes } from './api/routes/dashboard.js';
 import { disputeRoutes } from './api/routes/disputes.js';
+import { eventsRoute } from './api/routes/events.js';
 
 const log = createLogger('server');
 
@@ -19,6 +21,9 @@ async function main() {
 
   // CORS
   await app.register(cors, { origin: config.corsOrigin, credentials: true });
+
+  // WebSocket support
+  await app.register(websocket);
 
   // Health check
   app.get('/api/health', async () => ({
@@ -32,6 +37,7 @@ async function main() {
   await app.register(taskRoutes);
   await app.register(dashboardRoutes);
   await app.register(disputeRoutes);
+  await app.register(eventsRoute);
 
   // Connect DB
   await connectDB();
@@ -56,3 +62,4 @@ main().catch((err) => {
   log.error('Failed to start', { error: err instanceof Error ? err.message : String(err) });
   process.exit(1);
 });
+

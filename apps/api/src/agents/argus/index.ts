@@ -13,13 +13,19 @@
 
 import { Octokit } from 'octokit';
 import Groq from 'groq-sdk';
+import crypto from 'crypto';
 import { config } from '../../config/index.js';
 import { createLogger } from '../../utils/logger.js';
 import { prisma } from '../../db/index.js';
+import { emitAgentEvent } from '../../events/emitter.js';
+import { TaskCacheService } from '../../services/taskCache.js';
 
 const log = createLogger('agent:argus');
 
-const octokit = new Octokit({ auth: config.github.token || undefined });
+const octokit = new Octokit({
+  auth: config.github.token || undefined,
+  request: { timeout: 15000 }, // 15s timeout to prevent hanging on rate limits
+});
 const groq = new Groq({ apiKey: config.groq.apiKey || undefined });
 
 // ── GitHub Evidence Types ────────────────────────────────────────────────────
@@ -106,14 +112,32 @@ function parseRepoUrl(url: string): { owner: string; repo: string } {
   return { owner: match[1]!, repo: match[2]!.replace('.git', '') };
 }
 
-async function fetchGitHubEvidence(repoUrl: string, branch: string): Promise<GitHubEvidence> {
+async function fetchGitHubEvidence(repoUrl: string, branch: string, taskId?: string): Promise<GitHubEvidence> {
   const { owner, repo } = parseRepoUrl(repoUrl);
-  log.info('Fetching GitHub evidence', { owner, repo, branch });
+  const cacheKey = `evidence_cache:${owner}:${repo}:${branch}`;
+
+  // Try to get from cache first
+  const cached = await redis.get(cacheKey);
+  if (cached) {
+    log.info('Using cached GitHub evidence', { owner, repo, branch });
+    return JSON.parse(cached);
+  }
+
+  log.info('Fetching fresh GitHub evidence', { owner, repo, branch });
 
   try {
+    // Helper to detect and propagate rate-limit errors
+    const catchRateLimit = (err: unknown) => {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes('rate limit') || msg.includes('quota exhausted') || msg.includes('403')) {
+        throw new Error(`GitHub API rate limited: ${msg}`);
+      }
+      return { data: [] as any[] };
+    };
+
     const [commitsRes, prsRes, repoRes] = await Promise.all([
-      octokit.rest.repos.listCommits({ owner, repo, sha: branch, per_page: 50 }).catch(() => ({ data: [] })),
-      octokit.rest.pulls.list({ owner, repo, state: 'all', per_page: 20 }).catch(() => ({ data: [] })),
+      octokit.rest.repos.listCommits({ owner, repo, sha: branch, per_page: 50 }).catch(catchRateLimit),
+      octokit.rest.pulls.list({ owner, repo, state: 'all', per_page: 20 }).catch(catchRateLimit),
       octokit.rest.repos.get({ owner, repo }).catch(() => null),
     ]);
 
@@ -159,19 +183,15 @@ async function fetchGitHubEvidence(repoUrl: string, branch: string): Promise<Git
       if (f.language) languages[f.language] = (languages[f.language] ?? 0) + 1;
     }
 
-    // NEW: Fetch actual code content for key files
-    const codeSnapshots = await fetchKeyFileContents(owner, repo, branch, allPaths);
+    // PARALLELIZE secondary fetches
+    const [codeSnapshots, readmeContent, commitDiffs, ciResults] = await Promise.all([
+      fetchKeyFileContents(owner, repo, branch, allPaths),
+      fetchReadme(owner, repo, branch),
+      fetchCommitDiffs(owner, repo, commits.slice(0, 5)),
+      fetchCIResults(owner, repo, branch, commits[0]?.sha),
+    ]);
 
-    // NEW: Fetch README
-    const readmeContent = await fetchReadme(owner, repo, branch);
-
-    // Fetch commit diffs for recent commits
-    const commitDiffs = await fetchCommitDiffs(owner, repo, commits.slice(0, 5));
-
-    // Fetch CI / GitHub Actions results
-    const ciResults = await fetchCIResults(owner, repo, branch, commits[0]?.sha);
-
-    return {
+    const evidence: GitHubEvidence = {
       commits,
       pullRequests,
       filesChanged,
@@ -187,9 +207,20 @@ async function fetchGitHubEvidence(repoUrl: string, branch: string): Promise<Git
         defaultBranch: repoRes?.data.default_branch ?? 'main',
       },
     };
+
+    // Cache for 10 minutes
+    await redis.set(cacheKey, JSON.stringify(evidence), 'EX', 600);
+
+    return evidence;
   } catch (err) {
     log.warn('GitHub API failed, generating mock evidence', {
       error: err instanceof Error ? err.message : String(err),
+    });
+    emitAgentEvent({
+      type: 'agent_progress',
+      taskId: 'unknown',
+      agent: 'ARGUS',
+      message: `GitHub API unavailable (${err instanceof Error ? err.message : 'unknown error'}) — using heuristic evidence`,
     });
     return generateMockEvidence();
   }
@@ -247,9 +278,7 @@ async function fetchKeyFileContents(
     .sort((a, b) => b.priority - a.priority)
     .slice(0, MAX_CODE_FILES);
 
-  const snapshots: CodeSnapshot[] = [];
-
-  for (const { path } of scored) {
+  const snapshotPromises = scored.map(async ({ path }) => {
     try {
       const { data } = await octokit.rest.repos.getContent({
         owner, repo, path, ref: branch,
@@ -257,17 +286,20 @@ async function fetchKeyFileContents(
 
       if (data.content) {
         const decoded = Buffer.from(data.content, 'base64').toString('utf-8');
-        snapshots.push({
+        return {
           path,
           language: inferLanguage(path),
           content: decoded.slice(0, MAX_FILE_CONTENT_LENGTH),
           sizeBytes: data.size ?? decoded.length,
-        });
+        };
       }
     } catch {
-      // File might be too large or binary, skip
+      // skip
     }
-  }
+    return null;
+  });
+
+  const snapshots = (await Promise.all(snapshotPromises)).filter((s): s is CodeSnapshot => s !== null);
 
   log.info(`Fetched ${snapshots.length} code snapshots`, {
     files: snapshots.map(s => s.path),
@@ -295,9 +327,7 @@ async function fetchCommitDiffs(
   repo: string,
   commits: CommitData[],
 ): Promise<CommitDiff[]> {
-  const diffs: CommitDiff[] = [];
-
-  for (const commit of commits.slice(0, 3)) {
+  const diffPromises = commits.slice(0, 3).map(async (commit) => {
     try {
       const { data } = await octokit.rest.repos.getCommit({ owner, repo, ref: commit.sha });
       const patch = (data.files ?? [])
@@ -305,13 +335,17 @@ async function fetchCommitDiffs(
         .join('\n\n')
         .slice(0, 2000);
 
-      diffs.push({
+      return {
         sha: commit.sha.slice(0, 8),
         message: commit.message,
         patch,
-      });
-    } catch { /* skip */ }
-  }
+      };
+    } catch {
+      return null;
+    }
+  });
+
+  const diffs = (await Promise.all(diffPromises)).filter((d): d is CommitDiff => d !== null);
 
   return diffs;
 }
@@ -571,22 +605,47 @@ async function runAuditStream(
 ): Promise<AuditStreamResult> {
   const promptFn = AUDIT_STREAM_PROMPTS[streamName]!;
   const prompt = promptFn(specs, evidence);
+  
+  // LLM Cache Key: hash of prompt
+  const promptHash = crypto.createHash('sha256').update(prompt).digest('hex');
+  const cacheKey = `llm_cache:${streamName}:${promptHash}`;
+
+  const cached = await redis.get(cacheKey);
+  if (cached) {
+    log.info(`Using cached LLM response for ${streamName}`);
+    const parsed = JSON.parse(cached);
+    return {
+      agentName: streamName,
+      score: parsed.score ?? 50,
+      confidence: 0.95, // cached is highly confident
+      summary: parsed.summary ?? `${streamName} audit complete (cached)`,
+      reasoning: cached,
+      recommendations: parsed.recommendations ?? [],
+    };
+  }
 
   try {
-    const resp = await groq.chat.completions.create({
-      model: config.groq.model,
-      messages: [
-        { role: 'system', content: 'You are an expert auditor. Respond only in valid JSON.' },
-        { role: 'user', content: prompt },
-      ],
-      temperature: 0.2,
-      max_tokens: 1024,
-      response_format: { type: 'json_object' },
-    });
+    // Add 30s timeout to LLM call
+    const resp = await Promise.race([
+      groq.chat.completions.create({
+        model: config.groq.model,
+        messages: [
+          { role: 'system', content: 'You are an expert auditor. Respond only in valid JSON.' },
+          { role: 'user', content: prompt },
+        ],
+        temperature: 0.2,
+        max_tokens: 1024,
+        response_format: { type: 'json_object' },
+      }),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('LLM request timeout (30s)')), 30000))
+    ]);
 
     const content = resp.choices[0]?.message?.content;
     if (!content) throw new Error('Empty response');
     const parsed = JSON.parse(content);
+
+    // Cache successful response for 1 hour
+    await redis.set(cacheKey, content, 'EX', 3600);
 
     return {
       agentName: streamName,
@@ -672,6 +731,7 @@ export async function runArgus(taskId: string): Promise<void> {
 
   if (!task || task.submissions.length === 0) {
     log.warn('No task or submission found', { taskId });
+    emitAgentEvent({ type: 'agent_error', taskId, agent: 'ARGUS', message: 'No task or submission found' });
     return;
   }
 
@@ -680,36 +740,50 @@ export async function runArgus(taskId: string): Promise<void> {
 
   // Phase 1: Fetch all GitHub evidence
   log.info('Phase 1: Fetching evidence');
+  emitAgentEvent({ type: 'agent_progress', taskId, agent: 'ARGUS', message: `Fetching evidence from ${submission.repoUrl} (branch: ${submission.branch})` });
   const evidence = await fetchGitHubEvidence(submission.repoUrl, submission.branch);
 
-  // Store evidence on submission
-  await prisma.submission.update({
-    where: { id: submission.id },
-    data: { evidence: evidence as any },
+  // Buffer evidence in Redis
+  await TaskCacheService.bufferEvidence(taskId, evidence);
+
+  emitAgentEvent({
+    type: 'evidence_fetched',
+    taskId,
+    agent: 'ARGUS',
+    message: `Evidence collected: ${evidence.commits.length} commits, ${evidence.pullRequests.length} PRs, ${evidence.filesChanged.length} files, ${evidence.codeSnapshots.length} code snapshots, ${evidence.ciResults.length} CI results`,
+    data: { commits: evidence.commits.length, prs: evidence.pullRequests.length, files: evidence.filesChanged.length },
   });
 
   // Phase 2: Calculate objective score
+  emitAgentEvent({ type: 'agent_progress', taskId, agent: 'ARGUS', message: 'Computing objective evidence score...' });
   const { score: objectiveScore, breakdown } = calculateObjectiveScore(evidence);
 
-  // File Argus objective report
-  await prisma.agentReport.create({
-    data: {
-      taskId,
-      agentName: 'ARGUS',
-      score: objectiveScore,
-      confidence: 0.95,
-      severity: 'INFO',
-      summary: `Objective evidence score: ${objectiveScore}/100`,
-      reasoning: JSON.stringify(breakdown),
-      details: { evidence, breakdown } as any,
-      recommendations: objectiveScore < 50
-        ? ['Evidence is thin — more commits or test coverage needed']
-        : ['Sufficient evidence for AI audit streams'],
-    },
+  emitAgentEvent({
+    type: 'agent_progress',
+    taskId,
+    agent: 'ARGUS',
+    message: `Objective score: ${objectiveScore}/100`,
+    data: breakdown,
+  });
+
+  // Buffer Argus objective report
+  await TaskCacheService.bufferReport(taskId, {
+    taskId,
+    agentName: 'ARGUS',
+    score: objectiveScore,
+    confidence: 0.95,
+    severity: 'INFO',
+    summary: `Objective evidence score: ${objectiveScore}/100`,
+    reasoning: JSON.stringify(breakdown),
+    details: breakdown,
+    recommendations: objectiveScore < 60 ? ['Incomplete evidence detected'] : ['Strong evidence detected'],
   });
 
   // Phase 3: Spawn audit streams in parallel (Themis, Dike, Chronos)
   log.info('Phase 3: Running audit streams');
+  emitAgentEvent({ type: 'agent_start', taskId, agent: 'THEMIS', message: 'Themis audit stream started — checking spec compliance' });
+  emitAgentEvent({ type: 'agent_start', taskId, agent: 'DIKE', message: 'Dike audit stream started — evaluating code quality' });
+  emitAgentEvent({ type: 'agent_start', taskId, agent: 'CHRONOS', message: 'Chronos audit stream started — analyzing commit timeliness' });
   const auditResults = await Promise.all([
     runAuditStream('THEMIS', specs, evidence),
     runAuditStream('DIKE', specs, evidence),
@@ -718,21 +792,30 @@ export async function runArgus(taskId: string): Promise<void> {
 
   // Store each audit stream result as an agent report
   for (const result of auditResults) {
-    await prisma.agentReport.create({
-      data: {
-        taskId,
-        agentName: result.agentName,
-        score: result.score,
-        confidence: result.confidence,
-        severity: result.score < 40 ? 'HIGH' : result.score < 70 ? 'MEDIUM' : 'INFO',
-        summary: result.summary,
-        reasoning: result.reasoning,
-        recommendations: result.recommendations,
-      },
+    emitAgentEvent({
+      type: 'agent_complete',
+      taskId,
+      agent: result.agentName,
+      message: `${result.agentName} audit complete — Score: ${result.score}/100 — ${result.summary}`,
+      data: { score: result.score, confidence: result.confidence },
+    });
+
+    // Buffer stream report
+    await TaskCacheService.bufferReport(taskId, {
+      taskId,
+      agentName: result.agentName,
+      score: result.score,
+      confidence: result.confidence,
+      severity: result.score < 40 ? 'HIGH' : result.score < 70 ? 'MEDIUM' : 'INFO',
+      summary: result.summary,
+      reasoning: result.reasoning,
+      details: { stream: result.agentName },
+      recommendations: result.recommendations,
     });
   }
 
   // Phase 4: Iterative verification (cross-check flagged findings)
+  emitAgentEvent({ type: 'agent_progress', taskId, agent: 'ARGUS', message: 'Running iterative cross-verification on flagged findings...' });
   log.info('Phase 4: Iterative verification');
   const verification = await iterativeVerification(evidence, auditResults);
   if (verification) {

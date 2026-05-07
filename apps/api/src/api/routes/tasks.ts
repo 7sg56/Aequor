@@ -6,6 +6,7 @@ import { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { prisma } from '../../db/index.js';
 import { runVerificationPipeline } from '../../agents/index.js';
+import { TaskCacheService } from '../../services/taskCache.js';
 
 const CreateTaskSchema = z.object({
   title: z.string().min(1),
@@ -61,7 +62,26 @@ export async function taskRoutes(app: FastifyInstance) {
       },
     });
     if (!task) return reply.status(404).send({ success: false, error: { code: 'NOT_FOUND', message: 'Task not found' } });
+
+    // If task is in progress, merge buffered reports from Redis
+    if (task.status === 'REVIEWING') {
+      const bufferedReports = await TaskCacheService.getBufferedReports(id);
+      if (bufferedReports.length > 0) {
+        // Filter out any reports that might already exist in DB (unlikely but safe)
+        const dbAgentNames = new Set(task.agentReports.map(r => r.agentName));
+        const missingReports = bufferedReports.filter(r => !dbAgentNames.has(r.agentName));
+        (task as any).agentReports = [...task.agentReports, ...missingReports];
+      }
+    }
+
     return { success: true, data: task };
+  });
+
+  // Get historical events from Redis
+  app.get('/api/tasks/:id/events', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const events = await TaskCacheService.getEvents(id);
+    return { success: true, data: events };
   });
 
   // Create task
@@ -123,5 +143,83 @@ export async function taskRoutes(app: FastifyInstance) {
     const result = await runVerificationPipeline(id);
 
     return { success: true, data: result };
+  });
+
+  // ── Quick Verify (one-click GitHub URL flow) ────────────────────────────────
+  // This is the main user-facing endpoint: paste a GitHub URL, everything runs.
+
+  const QuickVerifySchema = z.object({
+    repoUrl: z.string().url(),
+    branch: z.string().default('main'),
+    title: z.string().optional(),
+    description: z.string().optional(),
+    specs: z.record(z.unknown()).optional(),
+  });
+
+  app.post('/api/tasks/quick-verify', async (req, reply) => {
+    const parsed = QuickVerifySchema.safeParse(req.body);
+    if (!parsed.success) {
+      return reply.status(400).send({ success: false, error: { code: 'VALIDATION', message: parsed.error.message } });
+    }
+
+    const { repoUrl, branch, title, description, specs } = parsed.data;
+
+    // Extract repo name for auto-title
+    const repoMatch = repoUrl.match(/github\.com\/([^/]+)\/([^/]+)/);
+    const autoTitle = repoMatch ? `Verify: ${repoMatch[1]}/${repoMatch[2]}` : `Verify: ${repoUrl}`;
+
+    // Auto-create task
+    const task = await prisma.task.create({
+      data: {
+        title: title || autoTitle,
+        description: description || `Automated verification of ${repoUrl}`,
+        repoUrl,
+        branch,
+        specs: (specs || { requirement: 'General code audit and quality check' }) as any,
+        escrowAmount: 0, // Quick verify doesn't require escrow
+        clientWallet: 'system-quick-verify',
+        status: 'SUBMITTED',
+      },
+    });
+
+    // Auto-create submission
+    await prisma.submission.create({
+      data: {
+        taskId: task.id,
+        repoUrl,
+        branch,
+        notes: 'Auto-created via quick-verify',
+      },
+    });
+
+    // Log it
+    await prisma.auditLog.create({
+      data: {
+        action: 'quick_verify_started',
+        actor: 'SYSTEM',
+        target: task.id,
+        details: { repoUrl, branch } as any,
+      },
+    });
+
+    // Update status and run pipeline async (don't block the response)
+    await prisma.task.update({ where: { id: task.id }, data: { status: 'REVIEWING' } });
+
+    // Fire pipeline in background — events will stream via WebSocket
+    runVerificationPipeline(task.id).catch((err) => {
+      console.error('Pipeline error:', err);
+    });
+
+    return reply.status(201).send({
+      success: true,
+      data: {
+        taskId: task.id,
+        title: task.title,
+        repoUrl,
+        branch,
+        status: 'REVIEWING',
+        message: 'Verification pipeline started. Connect to WebSocket at /ws/events for real-time updates.',
+      },
+    });
   });
 }
