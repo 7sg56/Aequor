@@ -6,6 +6,7 @@
 import { config } from '../../config/index.js';
 import { createLogger } from '../../utils/logger.js';
 import { prisma } from '../../db/index.js';
+import { TaskCacheService } from '../../services/taskCache.js';
 
 const log = createLogger('agent:kratos');
 
@@ -86,10 +87,7 @@ export function computeConsensus(
 export async function runKratos(taskId: string): Promise<ConsensusResult> {
   log.info('Kratos activated', { taskId });
 
-  const reports = await prisma.agentReport.findMany({
-    where: { taskId, agentName: { in: ['ARGUS', 'THEMIS', 'DIKE', 'CHRONOS'] } },
-    orderBy: { createdAt: 'desc' },
-  });
+  const reports = await TaskCacheService.getBufferedReports(taskId);
 
   // Take latest report per agent
   const latestByAgent: Record<string, number> = {};
@@ -101,41 +99,6 @@ export async function runKratos(taskId: string): Promise<ConsensusResult> {
 
   const consensus = computeConsensus(latestByAgent);
 
-  // File Kratos report
-  await prisma.agentReport.create({
-    data: {
-      taskId,
-      agentName: 'KRATOS',
-      score: consensus.finalScore,
-      confidence: Object.keys(latestByAgent).length >= 3 ? 0.9 : 0.6,
-      severity: consensus.decision === 'HOLD' ? 'HIGH' : consensus.decision === 'MANUAL_REVIEW' ? 'MEDIUM' : 'INFO',
-      summary: consensus.summary,
-      reasoning: JSON.stringify(consensus),
-      details: consensus as any,
-      recommendations: consensus.recommendations,
-    },
-  });
-
-  // Update task with score and decision
-  await prisma.task.update({
-    where: { id: taskId },
-    data: {
-      score: consensus.finalScore,
-      decision: consensus.decision,
-      status: consensus.decision === 'AUTO_RELEASE' ? 'APPROVED' : consensus.decision === 'HOLD' ? 'REVISION_REQUESTED' : 'REVIEWING',
-    },
-  });
-
-  // Audit log
-  await prisma.auditLog.create({
-    data: {
-      action: 'consensus_reached',
-      actor: 'KRATOS',
-      target: taskId,
-      details: { score: consensus.finalScore, decision: consensus.decision } as any,
-    },
-  });
-
-  log.info('Kratos consensus', { taskId, score: consensus.finalScore, decision: consensus.decision });
+  log.info('Kratos consensus computed (cached)', { taskId, score: consensus.finalScore, decision: consensus.decision });
   return consensus;
 }

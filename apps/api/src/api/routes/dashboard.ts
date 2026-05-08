@@ -4,6 +4,7 @@
 
 import { FastifyInstance } from 'fastify';
 import { prisma } from '../../db/index.js';
+import { TaskCacheService } from '../../services/taskCache.js';
 
 export async function dashboardRoutes(app: FastifyInstance) {
   app.get('/api/dashboard/stats', async () => {
@@ -43,7 +44,18 @@ export async function dashboardRoutes(app: FastifyInstance) {
       prisma.task.findMany({ orderBy: { updatedAt: 'desc' }, take: 10 }),
       prisma.agentReport.findMany({ orderBy: { createdAt: 'desc' }, take: 20 }),
     ]);
-    return { success: true, data: { recentTasks, recentReports } };
+
+    // Fetch reports from Redis for active tasks and merge them
+    const activeTaskIds = recentTasks.filter(t => t.status === 'REVIEWING').map(t => t.id);
+    const bufferedReportsPromises = activeTaskIds.map(id => TaskCacheService.getBufferedReports(id));
+    const allBuffered = (await Promise.all(bufferedReportsPromises)).flat();
+
+    // Deduplicate and merge
+    const mergedReports = [...allBuffered, ...recentReports].sort((a, b) => 
+      new Date(b.createdAt || Date.now()).getTime() - new Date(a.createdAt || Date.now()).getTime()
+    ).slice(0, 30);
+
+    return { success: true, data: { recentTasks, recentReports: mergedReports } };
   });
 
   app.get('/api/audit-log', async (req) => {
