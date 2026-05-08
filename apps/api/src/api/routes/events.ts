@@ -15,7 +15,7 @@ export async function eventsRoute(app: FastifyInstance) {
 
     const handler = (event: AgentEvent) => {
       try {
-        socket.send(JSON.stringify(event));
+        socket.socket.send(JSON.stringify(event));
       } catch {
         // Client disconnected
       }
@@ -28,7 +28,7 @@ export async function eventsRoute(app: FastifyInstance) {
       try {
         const msg = JSON.parse(data.toString());
         if (msg.type === 'ping') {
-          socket.send(JSON.stringify({ type: 'pong', timestamp: Date.now() }));
+          socket.socket.send(JSON.stringify({ type: 'pong', timestamp: Date.now() }));
         }
       } catch {
         // Ignore malformed messages

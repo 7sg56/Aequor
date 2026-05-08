@@ -11,6 +11,8 @@ export { runKratos } from './kratos/index.js';
 export { runNemesis } from './nemesis/index.js';
 export { runPlutus } from './plutus/index.js';
 
+import { runArgus } from './argus/index.js';
+import { runKratos } from './kratos/index.js';
 import { runPlutus } from './plutus/index.js';
 import { createLogger } from '../utils/logger.js';
 import { emitAgentEvent } from '../events/emitter.js';

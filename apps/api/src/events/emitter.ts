@@ -21,7 +21,7 @@ class AequorEventEmitter extends EventEmitter {
   }
 
   on(event: 'agent-event', listener: (payload: AgentEvent) => void): this;
-  on(event: string, listener: (...args: unknown[]) => void): this {
+  on(event: string, listener: (...args: any[]) => void): this {
     return super.on(event, listener);
   }
 }
