@@ -17,7 +17,7 @@ interface AgentReport {
   severity: string;
   summary: string;
   reasoning: string | null;
-  details: any;
+  details: Record<string, unknown>;
   recommendations: string[];
   createdAt: string;
 }
@@ -27,7 +27,7 @@ interface AuditLogEntry {
   action: string;
   actor: string;
   target: string;
-  details: any;
+  details: Record<string, unknown>;
   createdAt: string;
 }
 

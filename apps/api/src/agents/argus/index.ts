@@ -17,6 +17,7 @@ import crypto from 'crypto';
 import { config } from '../../config/index.js';
 import { createLogger } from '../../utils/logger.js';
 import { prisma } from '../../db/index.js';
+import { redis } from '../../db/redis.js';
 import { emitAgentEvent } from '../../events/emitter.js';
 import { TaskCacheService } from '../../services/taskCache.js';
 

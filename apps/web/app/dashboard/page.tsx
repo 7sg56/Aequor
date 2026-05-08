@@ -52,7 +52,9 @@ function useWebSocket() {
   const [events, setEvents] = useState<AgentEvent[]>([]);
   const [isConnected, setIsConnected] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
-  const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout>>();
+  const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout>>(undefined);
+
+  const connectRef = useRef<() => void>(() => {});
 
   const connect = useCallback(() => {
     // Guard: only run on client
@@ -87,7 +89,7 @@ function useWebSocket() {
         wsRef.current = null;
         // Auto-reconnect after 3 seconds
         if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
-        reconnectTimeoutRef.current = setTimeout(connect, 3000);
+        reconnectTimeoutRef.current = setTimeout(() => connectRef.current(), 3000);
       };
 
       ws.onerror = () => {
@@ -99,9 +101,14 @@ function useWebSocket() {
     } catch {
       // WebSocket not supported or URL error
       if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
-      reconnectTimeoutRef.current = setTimeout(connect, 5000);
+      reconnectTimeoutRef.current = setTimeout(() => connectRef.current(), 5000);
     }
   }, []);
+
+  useEffect(() => {
+    connectRef.current = connect;
+  }, [connect]);
+
 
   useEffect(() => {
     // Small delay to ensure we're fully mounted on client
@@ -242,7 +249,7 @@ export default function DashboardPage() {
         setError(json.error?.message || "Failed to start verification");
         setIsVerifying(false);
       }
-    } catch (err) {
+    } catch {
       setError("Cannot connect to API. Make sure the backend is running on port 4000.");
       setIsVerifying(false);
     }
